@@ -108,8 +108,14 @@ def SearchAndArgue(client, statement, searchPrompt, maxNumTexts, argueTrue):
     else:
         tf = "false"
 
-    promptForward = (f"I am going to feed you 1 evaluation statement and {maxNumTexts} texts. Argue that the evaluation statement "
-                     f"is {tf} based solely on those {maxNumTexts} texts")
+    promptForward = (
+        f"I am going to feed you 1 evaluation statement and {maxNumTexts} texts. "
+        f"Argue that the evaluation statement is {tf} based solely on those {maxNumTexts} texts. "
+        "Present the argument as distinct, individual points supporting this position. "
+        "For each point, state the specific claim and explain the reasoning behind it, showing how the relevant information in the texts supports the point and the overall position. "
+        "Do not summarize the texts or provide a general recap; analyze the evidence and explain why it matters to the evaluation statement. "
+        "Keep the points separate, avoid repeating the same argument, and do not introduce facts or assumptions that are not supported by the texts."
+    )
     argument = ollamaClient.chat(
         model=modelName,
         messages=[
