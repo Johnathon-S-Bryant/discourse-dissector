@@ -88,7 +88,8 @@ def validate_article_url(source):
     return source
 
 
-def SearchAndArgue(client, statement, searchPrompt, maxNumTexts, argueTrue):
+def SearchAndArgue(client, ollama_client, model_name, statement, searchPrompt, maxNumTexts, argueTrue):
+    maxNumTexts = min(max(1, int(maxNumTexts)), 3)
     searchResults = client.search(searchPrompt, max_results=maxNumTexts)
     urls = []
     texts = ""
@@ -103,23 +104,19 @@ def SearchAndArgue(client, statement, searchPrompt, maxNumTexts, argueTrue):
             texts += f"[Source {source_num}: {url}]\n{extracted}\n[/Source {source_num}]\n\n"
             source_num += 1
 
-    tf = ""
-    if argueTrue:
-        tf = "true"
-    else:
-        tf = "false"
+    tf = "true" if argueTrue else "false"
 
     promptForward = (
-        f"I am going to feed you 1 evaluation statement and {maxNumTexts} texts. "
-        f"Argue that the evaluation statement is {tf} based solely on those {maxNumTexts} texts. "
-        "Present the argument as distinct, individual points supporting this position. "
+        f"I am going to feed you 1 evaluation statement and up to {maxNumTexts} texts. "
+        f"Argue that the evaluation statement is {tf} based solely on those texts. "
+        "Present the argument as 3 distinct, individual points supporting this position. "
         "Start each point with [Source x: link] using the exact source number and URL provided in the texts, followed by the point. "
         "For each point, state the specific claim and explain the reasoning behind it, showing how the relevant information in the texts supports the point and the overall position. "
         "Do not summarize the texts or provide a general recap; analyze the evidence and explain why it matters to the evaluation statement. "
         "Keep the points separate, avoid repeating the same argument, and do not introduce facts or assumptions that are not supported by the texts."
     )
-    argument = ollamaClient.chat(
-        model=modelName,
+    argument = ollama_client.chat(
+        model=model_name,
         messages=[
             {
                 'role': 'user',
@@ -166,20 +163,17 @@ def extract_statements(source, selected_model):
 
 
 def run_analysis(chosenStatement, selected_model, numSources):
-    """Search for sources and generate both sides for the user-selected statement."""
-    global modelName, ollamaClient
-
-    modelName = selected_model
-    ollamaClient = Client(host='http://localhost:11434')
+    numSources = min(max(1, int(numSources)), 3)
 
     defenseSearchPrompt = (f"Here is a statement. Find me {numSources} resources defending this statement: {chosenStatement}")
     offenseSearchPrompt = (f"Here is a statement. Find me {numSources} resources countering this statement: {chosenStatement}")
     client = TavilyClient(api_key=os.environ["TAVILY_API_KEY"])
 
-    # Find and build the argument supporting the statement.
-    argument_for = SearchAndArgue(client, chosenStatement, defenseSearchPrompt, numSources, True)
-    # Find and build the argument countering the statement.
-    argument_against = SearchAndArgue(client, chosenStatement, offenseSearchPrompt, numSources, False)
+    for_ollama = Client(host='http://localhost:11434')
+    against_ollama = Client(host='http://localhost:11434')
+
+    argument_for = SearchAndArgue(client, for_ollama, selected_model, chosenStatement, defenseSearchPrompt, numSources, True)
+    argument_against = SearchAndArgue(client, against_ollama, selected_model, chosenStatement, offenseSearchPrompt, numSources, False)
 
     return {
         "chosen_statement": chosenStatement,
