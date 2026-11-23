@@ -128,39 +128,51 @@ def SearchAndArgue(client, ollama_client, model_name, statement, searchPrompt, m
 
 
 def extract_statements(source, selected_model):
-    """Extract candidate statements from an article for the user to select."""
-    global modelName, ollamaClient
-
-    modelName = selected_model
-    ollamaClient = Client(host='http://localhost:11434')
-
     source = validate_article_url(source)
     download = trafilatura.fetch_url(source)
     extractedText = trafilatura.extract(download)
     if extractedText is None:
         raise ValueError("No article text could be extracted from that link.")
 
-    delimiter = '$$$'
-    howToFormatOutputSubPrompt = (f"Delimit statements by putting {delimiter} at the end of each individual statement")
-    howToExtractSubPrompt = ("I am going to feed you a news article. Extract from the following text statements that may be true or false, but do not make a"
-                             " decision if those statements are true or false:")
-    extractedStatementsText = ollamaClient.chat(
-        model=modelName,
-        messages=[
-            {
-                'role': 'user',
-                'content': f"{howToFormatOutputSubPrompt} {howToExtractSubPrompt} {extractedText}"
-            }
-        ]
+    instructor_client = instructor.from_provider(
+        f"ollama/{selected_model}",
+        base_url="http://localhost:11434/v1",
+        mode=instructor.Mode.JSON,
     )
-    statementsText = extractedStatementsText.message.content
-    tokens = [statement.strip() for statement in statementsText.split(delimiter) if statement.strip()]
 
-    if not tokens:
+    prompt = (
+            "Extract between 5 and 10 distinct factual or arguable statements from the "
+            "following article that could be evaluated as true or false. Return each "
+            "statement as a separate item in the statements list, without combining "
+            "multiple statements into one item, without judging true/false, and without "
+            f"numbering: {extractedText}"
+        )
+    ollamaClient = Client(host='http://localhost:11434')
+    response = ollamaClient.chat(
+        model=selected_model,
+        format=StatementList.model_json_schema(),
+        messages=[{"role": "user", "content": prompt}],
+    )
+    result = StatementList.model_validate_json(response.message.content)
+
+    statements = []
+    for item in result.statements:
+        for line in item.splitlines():
+            line = line.strip(" \t\r\n()[]")
+            while line and (line[0].isdigit() or line[0] in ".-) "):
+                line = line[1:].strip()
+            if len(line) > 180 and ". " in line:
+                for part in line.split(". "):
+                    part = part.strip(" \t\r\n()[]")
+                    if part:
+                        statements.append(part if part.endswith(".") else part + ".")
+            elif line:
+                statements.append(line)
+
+    if not statements:
         raise ValueError("No statements could be extracted from the article.")
 
-    return tokens
-
+    return statements
 
 def run_analysis(chosenStatement, selected_model, numSources):
     numSources = min(max(1, int(numSources)), 3)
