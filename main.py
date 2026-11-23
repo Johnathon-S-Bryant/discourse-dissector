@@ -1,8 +1,8 @@
-# This is a sample Python script.
-
-# Press Shift+F10 to execute it or replace it with your code.
-# Press Double Shift to search everywhere for classes, files, tool windows, actions, and settings.
-
+'''
+Discourse dissector
+Created by Anthony Hardy, Johnathon Bryant.
+CSC-5240 Agentic Project
+'''
 import argparse
 import requests
 import logging
@@ -95,12 +95,13 @@ def SearchAndArgue(client, statement, searchPrompt, maxNumTexts, argueTrue):
     for r in searchResults['results']:
         urls.append(r['url'])
 
-    numTexts = maxNumTexts
+    source_num = 1
     for url in urls:
         downloaded = trafilatura.fetch_url(url)
         extracted = trafilatura.extract(downloaded)
         if extracted is not None:
-            texts += extracted + "+++++"
+            texts += f"[Source {source_num}: {url}]\n{extracted}\n[/Source {source_num}]\n\n"
+            source_num += 1
 
     tf = ""
     if argueTrue:
@@ -112,6 +113,7 @@ def SearchAndArgue(client, statement, searchPrompt, maxNumTexts, argueTrue):
         f"I am going to feed you 1 evaluation statement and {maxNumTexts} texts. "
         f"Argue that the evaluation statement is {tf} based solely on those {maxNumTexts} texts. "
         "Present the argument as distinct, individual points supporting this position. "
+        "Start each point with [Source x: link] using the exact source number and URL provided in the texts, followed by the point. "
         "For each point, state the specific claim and explain the reasoning behind it, showing how the relevant information in the texts supports the point and the overall position. "
         "Do not summarize the texts or provide a general recap; analyze the evidence and explain why it matters to the evaluation statement. "
         "Keep the points separate, avoid repeating the same argument, and do not introduce facts or assumptions that are not supported by the texts."
