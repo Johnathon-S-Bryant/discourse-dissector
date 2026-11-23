@@ -155,11 +155,6 @@ def extract_statements(source, selected_model):
     if extractedText is None:
         raise ValueError("No article text could be extracted from that link.")
 
-    instructor_client = instructor.from_provider(
-        f"ollama/{selected_model}",
-        base_url="http://localhost:11434/v1",
-        mode=instructor.Mode.JSON,
-    )
 
     prompt = (
             "Extract between 5 and 10 distinct factual or arguable statements from the "
@@ -255,8 +250,8 @@ class DiscourseDissector:
     def __init__(self, root):
         self.root = root
         root.title("Discourse Dissector")
-        root.geometry("760x760")
-        root.minsize(560, 520)
+        root.geometry("820x780")
+        root.minsize(600, 540)
         apply_theme(root)
 
         self.result_queue = queue.Queue()
@@ -330,19 +325,19 @@ class DiscourseDissector:
         self.resources_value_label.pack(anchor="center")
 
         self.resources_slider = tk.Scale(
-                    resources_frame,
-                    from_=1,
-                    to=3,
-                    resolution=1,
-                    orient="horizontal",
-                    showvalue=False,
-                    variable=self.resources_var,
-                    bg=THEME_BG,
-                    fg=THEME_FG,
-                    highlightthickness=0,
-                    troughcolor=THEME_FIELD_BG,
-                    activebackground=THEME_ACCENT,
-                )
+            resources_frame,
+            from_=1,
+            to=3,
+            resolution=1,
+            orient="horizontal",
+            showvalue=False,
+            variable=self.resources_var,
+            bg=THEME_BG,
+            fg=THEME_FG,
+            highlightthickness=0,
+            troughcolor=THEME_FIELD_BG,
+            activebackground=THEME_ACCENT,
+        )
         self.resources_slider.pack(fill="x")
 
         run_frame = ttk.Frame(self.content)
@@ -398,10 +393,46 @@ class DiscourseDissector:
         results_frame.pack(fill="both", expand=True, pady=(0, 12))
         self.results_frame = results_frame
 
-        self.results_text = tk.Text(
+        self.chosen_statement_label = tk.Label(
             results_frame,
+            text="Chosen Statement: None yet",
+            bg=THEME_BG,
+            fg=THEME_FG,
+            font=("Segoe UI", 10, "bold"),
+            anchor="w",
+            justify="left",
+            wraplength=720,
+        )
+        self.chosen_statement_label.pack(fill="x", pady=(0, 10))
+
+        sides_frame = ttk.Frame(results_frame)
+        sides_frame.pack(fill="both", expand=True)
+        sides_frame.columnconfigure(0, weight=1, uniform="args")
+        sides_frame.columnconfigure(1, weight=1, uniform="args")
+        sides_frame.rowconfigure(0, weight=1)
+
+        for_box = ttk.LabelFrame(sides_frame, text="Arguments FOR", padding=8)
+        for_box.grid(row=0, column=0, sticky="nsew", padx=(0, 6))
+        self.for_text = self._create_argument_text(
+            for_box,
+            "Extract an article and select a statement to see arguments FOR.",
+        )
+
+        against_box = ttk.LabelFrame(sides_frame, text="Arguments AGAINST", padding=8)
+        against_box.grid(row=0, column=1, sticky="nsew", padx=(6, 0))
+        self.against_text = self._create_argument_text(
+            against_box,
+            "Extract an article and select a statement to see arguments AGAINST.",
+        )
+
+    def _create_argument_text(self, parent, initial_message):
+        container = ttk.Frame(parent)
+        container.pack(fill="both", expand=True)
+
+        text_widget = tk.Text(
+            container,
             wrap="word",
-            height=28,
+            height=22,
             bg=THEME_FIELD_BG,
             fg=THEME_FG,
             relief="solid",
@@ -409,20 +440,21 @@ class DiscourseDissector:
             padx=10,
             pady=10,
         )
-        results_scrollbar = ttk.Scrollbar(results_frame, orient="vertical", command=self.results_text.yview)
-        self.results_text.configure(yscrollcommand=results_scrollbar.set)
-        results_scrollbar.pack(side="right", fill="y")
-        self.results_text.pack(side="left", fill="both", expand=True)
+        scrollbar = ttk.Scrollbar(container, orient="vertical", command=text_widget.yview)
+        text_widget.configure(yscrollcommand=scrollbar.set)
+        scrollbar.pack(side="right", fill="y")
+        text_widget.pack(side="left", fill="both", expand=True)
 
-        self.results_text.tag_configure("heading", font=("Segoe UI", 10, "bold"), foreground=THEME_ACCENT)
-        self.results_text.insert("end", "Extract an article to display its statements here.\n")
-        self.results_text.configure(state="disabled")
+        text_widget.insert("end", initial_message + "\n")
+        text_widget.configure(state="disabled")
+        return text_widget
 
     def _resize_statement_cards(self, event):
         if event.widget is self.root:
             wraplength = max(300, event.width - 150)
             for radio_button in self.statement_radio_buttons:
                 radio_button.configure(wraplength=wraplength)
+            self.chosen_statement_label.configure(wraplength=max(300, event.width - 80))
 
     def _populate_statement_selection(self):
         for child in self.statements_container.winfo_children():
@@ -487,12 +519,18 @@ class DiscourseDissector:
         if status_text:
             self.status_label.configure(text=status_text)
 
-    def _set_results(self, content):
-        self.results_text.configure(state="normal")
-        self.results_text.delete("1.0", "end")
-        self.results_text.insert("end", content)
-        self.results_text.configure(state="disabled")
-        self.results_text.yview_moveto(0)
+    def _set_box_text(self, text_widget, content):
+        text_widget.configure(state="normal")
+        text_widget.delete("1.0", "end")
+        text_widget.insert("end", content)
+        text_widget.configure(state="disabled")
+        text_widget.yview_moveto(0)
+
+    def _set_results(self, for_content, against_content, chosen_statement=None):
+        if chosen_statement is not None:
+            self.chosen_statement_label.configure(text=f"Chosen Statement: {chosen_statement}")
+        self._set_box_text(self.for_text, for_content)
+        self._set_box_text(self.against_text, against_content)
 
     def on_extract(self):
         source = self.statement_entry.get().strip()
@@ -509,7 +547,11 @@ class DiscourseDissector:
         self.extracted_statements = []
         self.statement_selection_var.set("")
         self.selection_frame.pack_forget()
-        self._set_results("Extracting statements from the article...\n")
+        self._set_results(
+            "Extracting statements from the article...\n",
+            "Extracting statements from the article...\n",
+            chosen_statement="None yet",
+        )
         selected_model = self.model_var.get()
         self._set_busy(True, "Extracting statements from the article...")
 
@@ -530,7 +572,11 @@ class DiscourseDissector:
         selected_model = self.model_var.get()
         num_sources = int(self.resources_var.get())
 
-        self._set_results("Searching for sources and generating both arguments...\n")
+        self._set_results(
+            "Searching for sources and generating arguments FOR...\n",
+            "Searching for sources and generating arguments AGAINST...\n",
+            chosen_statement=chosen_statement,
+        )
         self._set_busy(True, "Searching for sources and generating arguments...")
 
         worker = threading.Thread(
@@ -567,21 +613,22 @@ class DiscourseDissector:
             self.extracted_statements = result
             self._populate_statement_selection()
             self.selection_frame.pack(fill="x", pady=(0, 12), before=self.results_frame)
-            self._set_results("Select a statement above, then click 'Analyze Selected Statement'.\n")
+            self._set_results(
+                "Select a statement above, then click 'Analyze Selected Statement'.\n",
+                "Select a statement above, then click 'Analyze Selected Statement'.\n",
+                chosen_statement="None yet",
+            )
             self.status_label.configure(text=f"Extracted {len(result)} statement(s). Select one to continue.")
         elif result_type == "analysis_success":
-            output = (
-                "Chosen Statement:\n"
-                f"{result['chosen_statement']}\n\n"
-                "Arguments for STATEMENT:\n"
-                f"{result['argument_for']}\n\n"
-                "Arguments against STATEMENT:\n"
-                f"{result['argument_against']}\n"
+            self._set_results(
+                f"{result['argument_for']}\n",
+                f"{result['argument_against']}\n",
+                chosen_statement=result["chosen_statement"],
             )
-            self._set_results(output)
             self.status_label.configure(text="Dissection complete. You can select another statement to analyze.")
         else:
-            self._set_results(f"The dissection could not be completed.\n\n{result}\n")
+            error_msg = f"The dissection could not be completed.\n\n{result}\n"
+            self._set_results(error_msg, error_msg)
             self.status_label.configure(text="An error occurred. See the results area for details.")
 
         self.root.after(100, self._poll_result_queue)
