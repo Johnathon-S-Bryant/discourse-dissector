@@ -75,14 +75,15 @@ def validate_article_url(source):
         raise ValueError("Enter a valid article URL.")
 
     hostname = parsed.hostname.lower().rstrip(".")
-    if (
-        hostname == "youtu.be"
-        or hostname.endswith(".youtu.be")
-        or hostname == "youtube.com"
-        or hostname.endswith(".youtube.com")
-        or hostname == "youtube-nocookie.com"
-        or hostname.endswith(".youtube-nocookie.com")
-    ):
+    youtube_hosts = (
+        "youtu.be",
+        ".youtu.be",
+        "youtube.com",
+        ".youtube.com",
+        "youtube-nocookie.com",
+        ".youtube-nocookie.com",
+    )
+    if hostname in youtube_hosts or hostname.endswith(youtube_hosts):
         raise ValueError("YouTube links are not supported. Enter an article URL.")
 
     return source
@@ -91,18 +92,38 @@ def validate_article_url(source):
 def SearchAndArgue(client, ollama_client, model_name, statement, searchPrompt, maxNumTexts, argueTrue):
     maxNumTexts = min(max(1, int(maxNumTexts)), 3)
     searchResults = client.search(searchPrompt, max_results=maxNumTexts)
-    urls = []
-    texts = ""
-    for r in searchResults['results']:
-        urls.append(r['url'])
 
-    source_num = 1
-    for url in urls:
+    raw_text = f"{statement} {searchPrompt}".lower()
+    keywords = [w.strip(".,!?;:\"'()[]") for w in raw_text.split()]
+    keywords = [w for w in keywords if len(w) > 4]
+
+    seen_urls = set()
+    candidates = []
+    for r in searchResults['results']:
+        url = r.get('url')
+        if not url or url in seen_urls:
+            continue
+        seen_urls.add(url)
+
         downloaded = trafilatura.fetch_url(url)
         extracted = trafilatura.extract(downloaded)
-        if extracted is not None:
-            texts += f"[Source {source_num}: {url}]\n{extracted}\n[/Source {source_num}]\n\n"
-            source_num += 1
+        if extracted:
+            candidates.append((url, extracted))
+
+    matched = []
+    if keywords:
+        for url, extracted in candidates:
+            lower_text = extracted.lower()
+            if any(kw in lower_text for kw in keywords):
+                matched.append((url, extracted))
+
+    chosen_articles = matched if matched else candidates
+
+    texts = ""
+    source_num = 1
+    for url, extracted in chosen_articles:
+        texts += f"[Source {source_num}: {url}]\n{extracted}\n[/Source {source_num}]\n\n"
+        source_num += 1
 
     tf = "true" if argueTrue else "false"
 
@@ -309,19 +330,19 @@ class DiscourseDissector:
         self.resources_value_label.pack(anchor="center")
 
         self.resources_slider = tk.Scale(
-            resources_frame,
-            from_=1,
-            to=10,
-            resolution=1,
-            orient="horizontal",
-            showvalue=False,
-            variable=self.resources_var,
-            bg=THEME_BG,
-            fg=THEME_FG,
-            highlightthickness=0,
-            troughcolor=THEME_FIELD_BG,
-            activebackground=THEME_ACCENT,
-        )
+                    resources_frame,
+                    from_=1,
+                    to=3,
+                    resolution=1,
+                    orient="horizontal",
+                    showvalue=False,
+                    variable=self.resources_var,
+                    bg=THEME_BG,
+                    fg=THEME_FG,
+                    highlightthickness=0,
+                    troughcolor=THEME_FIELD_BG,
+                    activebackground=THEME_ACCENT,
+                )
         self.resources_slider.pack(fill="x")
 
         run_frame = ttk.Frame(self.content)
