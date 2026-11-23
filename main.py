@@ -6,6 +6,8 @@ CSC-5240 Agentic Project
 import argparse
 import requests
 import logging
+import shutil
+import subprocess
 import trafilatura
 from pydantic import BaseModel
 import instructor
@@ -17,7 +19,7 @@ from dotenv import load_dotenv
 import threading
 import queue
 import tkinter as tk
-from tkinter import ttk
+from tkinter import ttk, filedialog
 from urllib.parse import urlparse
 
 load_dotenv()
@@ -155,14 +157,13 @@ def extract_statements(source, selected_model):
     if extractedText is None:
         raise ValueError("No article text could be extracted from that link.")
 
-
     prompt = (
-            "Extract between 5 and 10 distinct factual or arguable statements from the "
-            "following article that could be evaluated as true or false. Return each "
-            "statement as a separate item in the statements list, without combining "
-            "multiple statements into one item, without judging true/false, and without "
-            f"numbering: {extractedText}"
-        )
+        "Extract between 5 and 10 distinct factual or arguable statements from the "
+        "following article that could be evaluated as true or false. Return each "
+        "statement as a separate item in the statements list, without combining "
+        "multiple statements into one item, without judging true/false, and without "
+        f"numbering: {extractedText}"
+    )
     ollamaClient = Client(host='http://localhost:11434')
     response = ollamaClient.chat(
         model=selected_model,
@@ -190,6 +191,7 @@ def extract_statements(source, selected_model):
 
     return statements
 
+
 def run_analysis(chosenStatement, selected_model, numSources):
     numSources = min(max(1, int(numSources)), 3)
 
@@ -208,6 +210,75 @@ def run_analysis(chosenStatement, selected_model, numSources):
         "argument_for": argument_for,
         "argument_against": argument_against,
     }
+
+
+def escape_latex(text):
+    """Escape special LaTeX characters so generated text compiles cleanly."""
+    replacements = {
+        "\\": r"\textbackslash{}",
+        "&": r"\&",
+        "%": r"\%",
+        "$": r"\$",
+        "#": r"\#",
+        "_": r"\_",
+        "{": r"\{",
+        "}": r"\}",
+        "~": r"\textasciitilde{}",
+        "^": r"\textasciicircum{}",
+    }
+    return "".join(replacements.get(ch, ch) for ch in (text or ""))
+
+
+def build_latex_document(chosen_statement, argument_for, argument_against):
+    """Build a complete LaTeX document string for the dissection results."""
+    stmt_tex = escape_latex(chosen_statement)
+    for_tex = escape_latex(argument_for).replace("\n\n", "\n\n\\medskip\n\n").replace("\n", "\\\\\n")
+    against_tex = escape_latex(argument_against).replace("\n\n", "\n\n\\medskip\n\n").replace("\n", "\\\\\n")
+
+    return (
+        "\\documentclass[11pt]{article}\n"
+        "\\usepackage[margin=1in]{geometry}\n"
+        "\\usepackage[T1]{fontenc}\n"
+        "\\usepackage[utf8]{inputenc}\n"
+        "\\usepackage{xcolor}\n"
+        "\\usepackage{hyperref}\n"
+        "\\definecolor{accent}{HTML}{087E8B}\n"
+        "\\title{Discourse Dissector Report}\n"
+        "\\date{}\n"
+        "\\begin{document}\n"
+        "\\maketitle\n\n"
+        "\\section*{Chosen Statement}\n"
+        f"\\begin{{quote}}{stmt_tex}\\end{{quote}}\n\n"
+        "\\section*{Arguments FOR}\n"
+        f"{for_tex}\n\n"
+        "\\section*{Arguments AGAINST}\n"
+        f"{against_tex}\n\n"
+        "\\end{document}\n"
+    )
+
+
+def export_latex_and_pdf(tex_path, chosen_statement, argument_for, argument_against):
+    """Write a .tex file and compile to .pdf via pdflatex if available."""
+    tex_content = build_latex_document(chosen_statement, argument_for, argument_against)
+    with open(tex_path, "w", encoding="utf-8") as f:
+        f.write(tex_content)
+
+    pdflatex_bin = shutil.which("pdflatex")
+    if not pdflatex_bin:
+        return tex_path, None, "Saved .tex file (pdflatex not found in PATH for PDF export)."
+
+    out_dir = os.path.dirname(os.path.abspath(tex_path))
+    proc = subprocess.run(
+        [pdflatex_bin, "-interaction=nonstopmode", f"-output-directory={out_dir}", os.path.abspath(tex_path)],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    pdf_path = os.path.splitext(os.path.abspath(tex_path))[0] + ".pdf"
+    if proc.returncode == 0 and os.path.exists(pdf_path):
+        return tex_path, pdf_path, f"Exported LaTeX and compiled PDF: {os.path.basename(pdf_path)}"
+
+    return tex_path, None, f"Saved .tex file, but PDF compilation returned an error (code {proc.returncode})."
 
 
 class ScrollableFrame(ttk.Frame):
@@ -260,6 +331,7 @@ class DiscourseDissector:
         self.statement_selection_var = tk.StringVar(value="")
         self.extracted_statements = []
         self.statement_radio_buttons = []
+        self.last_analysis = None
         self.is_busy = False
 
         self.scrollable = ScrollableFrame(root)
@@ -425,6 +497,15 @@ class DiscourseDissector:
             "Extract an article and select a statement to see arguments AGAINST.",
         )
 
+        self.export_button = ttk.Button(
+            results_frame,
+            text="Export to LaTeX / PDF",
+            style="Accent.TButton",
+            command=self.on_export_latex,
+            state="disabled",
+        )
+        self.export_button.pack(anchor="e", pady=(10, 0))
+
     def _create_argument_text(self, parent, initial_message):
         container = ttk.Frame(parent)
         container.pack(fill="both", expand=True)
@@ -506,6 +587,9 @@ class DiscourseDissector:
         self.model_dropdown.configure(state="disabled" if busy else "readonly")
         self.resources_slider.configure(state=widget_state)
         self.extract_button.configure(state=widget_state)
+        self.export_button.configure(
+            state="normal" if (not busy and self.last_analysis is not None) else "disabled"
+        )
 
         if busy:
             self.progress.pack(anchor="center", pady=(10, 4))
@@ -586,6 +670,30 @@ class DiscourseDissector:
         )
         worker.start()
 
+    def on_export_latex(self):
+        if not self.last_analysis:
+            self.status_label.configure(text="Run an analysis before exporting.")
+            return
+
+        file_path = filedialog.asksaveasfilename(
+            title="Save LaTeX Report",
+            defaultextension=".tex",
+            filetypes=[("LaTeX files", "*.tex"), ("All files", "*.*")],
+        )
+        if not file_path:
+            return
+
+        try:
+            _tex_path, _pdf_path, message = export_latex_and_pdf(
+                file_path,
+                self.last_analysis["chosen_statement"],
+                self.last_analysis["argument_for"],
+                self.last_analysis["argument_against"],
+            )
+            self.status_label.configure(text=message)
+        except Exception as exc:
+            self.status_label.configure(text=f"Export failed: {exc}")
+
     def _extract_in_background(self, source, selected_model):
         try:
             statements = extract_statements(source, selected_model)
@@ -620,6 +728,8 @@ class DiscourseDissector:
             )
             self.status_label.configure(text=f"Extracted {len(result)} statement(s). Select one to continue.")
         elif result_type == "analysis_success":
+            self.last_analysis = result
+            self.export_button.configure(state="normal")
             self._set_results(
                 f"{result['argument_for']}\n",
                 f"{result['argument_against']}\n",
