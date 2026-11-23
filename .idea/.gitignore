@@ -50,6 +50,14 @@ venv/
 env/
 ENV/
 .env
+environment/.env
+/environment/.env
+~/environment/.env
+~/.env
+*/.env
+*.env
+*/environment/.env
+
 
 # IDEs and Editors
 .vscode/
