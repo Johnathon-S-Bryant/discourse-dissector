@@ -90,6 +90,20 @@ def validate_article_url(source):
 
     return source
 
+def JudgeIfStatementSensical(ollama_client, model_name, argument):
+    prompt = ("I am going to feed you a statement which is an argument. The argument cites sources for its statements."
+              "Judge if the argument makes sense based on the evidence given.")
+    judgement = ollama_client.chat(
+        model=model_name,
+        messages=[
+            {
+                'role': 'user',
+                'content': f"{prompt} | Evaluation statement: {argument}" # | Texts: {texts}"
+            }
+        ]
+    )
+    return judgement.message.content
+
 
 def SearchAndArgue(client, ollama_client, model_name, statement, searchPrompt, maxNumTexts, argueTrue):
     maxNumTexts = min(max(1, int(maxNumTexts)), 3)
@@ -204,11 +218,15 @@ def run_analysis(chosenStatement, selected_model, numSources):
 
     argument_for = SearchAndArgue(client, for_ollama, selected_model, chosenStatement, defenseSearchPrompt, numSources, True)
     argument_against = SearchAndArgue(client, against_ollama, selected_model, chosenStatement, offenseSearchPrompt, numSources, False)
+    judgement_of_argument_for = JudgeIfStatementSensical(for_ollama, selected_model, argument_for)
+    judgement_of_argument_against = JudgeIfStatementSensical(against_ollama, selected_model, argument_against)
 
     return {
         "chosen_statement": chosenStatement,
         "argument_for": argument_for,
         "argument_against": argument_against,
+        "judgement_of_argument_for": judgement_of_argument_for,
+        "judgement_of_argument_against": judgement_of_argument_against
     }
 
 
@@ -229,11 +247,13 @@ def escape_latex(text):
     return "".join(replacements.get(ch, ch) for ch in (text or ""))
 
 
-def build_latex_document(chosen_statement, argument_for, argument_against):
+def build_latex_document(chosen_statement, argument_for, argument_against, judgement_of_argument_for, judgement_of_argument_against):
     """Build a complete LaTeX document string for the dissection results."""
     stmt_tex = escape_latex(chosen_statement)
     for_tex = escape_latex(argument_for).replace("\n\n", "\n\n\\medskip\n\n").replace("\n", "\\\\\n")
     against_tex = escape_latex(argument_against).replace("\n\n", "\n\n\\medskip\n\n").replace("\n", "\\\\\n")
+    judge_for_tex = escape_latex(judgement_of_argument_for).replace("\n\n", "\n\n\\medskip\n\n").replace("\n", "\\\\\n")
+    judge_against_tex = escape_latex(judgement_of_argument_against).replace("\n\n", "\n\n\\medskip\n\n").replace("\n", "\\\\\n")
 
     return (
         "\\documentclass[11pt]{article}\n"
@@ -253,13 +273,17 @@ def build_latex_document(chosen_statement, argument_for, argument_against):
         f"{for_tex}\n\n"
         "\\section*{Arguments AGAINST}\n"
         f"{against_tex}\n\n"
+        "\\section*{Self-Judgement FOR}\n"
+        f"{judge_for_tex}\n\n"
+        "\\section*{Self-Judgement AGAINST}\n"
+        f"{judge_against_tex}\n\n"
         "\\end{document}\n"
     )
 
 
-def export_latex_and_pdf(tex_path, chosen_statement, argument_for, argument_against):
+def export_latex_and_pdf(tex_path, chosen_statement, argument_for, argument_against, judgement_of_argument_for, judgement_of_argument_against):
     """Write a .tex file and compile to .pdf via pdflatex if available."""
-    tex_content = build_latex_document(chosen_statement, argument_for, argument_against)
+    tex_content = build_latex_document(chosen_statement, argument_for, argument_against, judgement_of_argument_for, judgement_of_argument_against)
     with open(tex_path, "w", encoding="utf-8") as f:
         f.write(tex_content)
 
@@ -615,6 +639,8 @@ class DiscourseDissector:
             self.chosen_statement_label.configure(text=f"Chosen Statement: {chosen_statement}")
         self._set_box_text(self.for_text, for_content)
         self._set_box_text(self.against_text, against_content)
+        #self._set_box_text(self.judgement_for_text, judgement_for_content)
+        #self._set_box_text(self.judgement_against_text, judgement_against_content)
 
     def on_extract(self):
         source = self.statement_entry.get().strip()
@@ -689,6 +715,8 @@ class DiscourseDissector:
                 self.last_analysis["chosen_statement"],
                 self.last_analysis["argument_for"],
                 self.last_analysis["argument_against"],
+                self.last_analysis["judgement_of_argument_for"],
+                self.last_analysis["judgement_of_argument_against"]
             )
             self.status_label.configure(text=message)
         except Exception as exc:
@@ -730,9 +758,10 @@ class DiscourseDissector:
         elif result_type == "analysis_success":
             self.last_analysis = result
             self.export_button.configure(state="normal")
+            judgement_intro_str = "I have double-checked my work. This is what I got on the second time around"
             self._set_results(
-                f"{result['argument_for']}\n",
-                f"{result['argument_against']}\n",
+                f"{result['argument_for']}\n\n {judgement_intro_str}\n {result['judgement_of_argument_for']}\n",
+                f"{result['argument_against']}\n\n {judgement_intro_str}\n {result['judgement_of_argument_against']}\n",
                 chosen_statement=result["chosen_statement"],
             )
             self.status_label.configure(text="Dissection complete. You can select another statement to analyze.")
