@@ -64,3 +64,16 @@ environment/.env
 .idea/
 *.swp
 *.swo
+
+# other stuff
+report.tex
+report.pdf
+report.log
+report.logs
+*.bib
+references.bib
+*.aux
+*.out
+*.gz
+*.bbl
+*.blg
