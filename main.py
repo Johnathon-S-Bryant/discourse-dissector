@@ -1,12 +1,13 @@
-# This is a sample Python script.
-
-# Press Shift+F10 to execute it or replace it with your code.
-# Press Double Shift to search everywhere for classes, files, tool windows, actions, and settings.
-
-
+'''
+Discourse dissector
+Created by Anthony Hardy, Johnathon Bryant.
+CSC-5240 Agentic Project
+'''
 import argparse
 import requests
 import logging
+import shutil
+import subprocess
 import trafilatura
 from pydantic import BaseModel
 import instructor
@@ -14,37 +15,145 @@ from ollama import Client
 from tavily import TavilyClient
 import os
 import random
+from dotenv import load_dotenv
+import threading
+import queue
+import tkinter as tk
+from tkinter import ttk, filedialog
+from urllib.parse import urlparse
+
+load_dotenv()
+
+THEME_BG = "#e8f1f5"
+THEME_FG = "#0b3954"
+THEME_ACCENT = "#087e8b"
+THEME_ACCENT_FG = "#ffffff"
+THEME_FIELD_BG = "#ffffff"
+THEME_FONT = ("Segoe UI", 10)
+
+
+def apply_theme(root):
+    """Apply the project theme as defaults; per-widget options override these."""
+    root.configure(bg=THEME_BG)
+    root.option_add("*background", THEME_BG)
+    root.option_add("*foreground", THEME_FG)
+    root.option_add("*font", THEME_FONT)
+    root.option_add("*Entry.background", THEME_FIELD_BG)
+    root.option_add("*Text.background", THEME_FIELD_BG)
+    root.option_add("*Listbox.background", THEME_FIELD_BG)
+    root.option_add("*Button.background", THEME_ACCENT)
+    root.option_add("*Button.foreground", THEME_ACCENT_FG)
+    style = ttk.Style(root)
+    try:
+        style.theme_use("clam")
+    except tk.TclError:
+        pass
+    style.configure(
+        ".",
+        background=THEME_BG,
+        foreground=THEME_FG,
+        fieldbackground=THEME_FIELD_BG,
+        font=THEME_FONT,
+    )
+    style.configure("Accent.TButton", background=THEME_ACCENT, foreground=THEME_ACCENT_FG)
+
 
 class Statement(BaseModel):
     text: str
 
+
 class StatementList(BaseModel):
     statements: list[str]
 
-def SearchAndArgue(client, statement, searchPrompt, maxNumTexts, argueTrue):
-    searchResults = client.search(searchPrompt)
-    urls = []
-    texts = ""
-    for r in searchResults['results']:
-        urls.append(r['url'])
 
-    numTexts = maxNumTexts
-    for url in urls:
+def validate_article_url(source):
+    """Accept article URLs only and reject YouTube links."""
+    source = source.strip()
+    if source.startswith("www."):
+        source = "https://" + source
+
+    parsed = urlparse(source)
+    if parsed.scheme not in ("http", "https") or not parsed.hostname:
+        raise ValueError("Enter a valid article URL.")
+
+    hostname = parsed.hostname.lower().rstrip(".")
+    youtube_hosts = (
+        "youtu.be",
+        ".youtu.be",
+        "youtube.com",
+        ".youtube.com",
+        "youtube-nocookie.com",
+        ".youtube-nocookie.com",
+    )
+    if hostname in youtube_hosts or hostname.endswith(youtube_hosts):
+        raise ValueError("YouTube links are not supported. Enter an article URL.")
+
+    return source
+
+def JudgeIfStatementSensical(ollama_client, model_name, argument):
+    prompt = ("I am going to feed you a statement which is an argument. The argument cites sources for its statements."
+              "Judge if the argument makes sense based on the evidence given.")
+    judgement = ollama_client.chat(
+        model=model_name,
+        messages=[
+            {
+                'role': 'user',
+                'content': f"{prompt} | Evaluation statement: {argument}" # | Texts: {texts}"
+            }
+        ]
+    )
+    return judgement.message.content
+
+
+def SearchAndArgue(client, ollama_client, model_name, statement, searchPrompt, maxNumTexts, argueTrue):
+    maxNumTexts = min(max(1, int(maxNumTexts)), 3)
+    searchResults = client.search(searchPrompt, max_results=maxNumTexts)
+
+    raw_text = f"{statement} {searchPrompt}".lower()
+    keywords = [w.strip(".,!?;:\"'()[]") for w in raw_text.split()]
+    keywords = [w for w in keywords if len(w) > 4]
+
+    seen_urls = set()
+    candidates = []
+    for r in searchResults['results']:
+        url = r.get('url')
+        if not url or url in seen_urls:
+            continue
+        seen_urls.add(url)
+
         downloaded = trafilatura.fetch_url(url)
         extracted = trafilatura.extract(downloaded)
-        if extracted is not None:
-            texts += extracted + "+++++"
+        if extracted:
+            candidates.append((url, extracted))
 
-    tf = ""
-    if argueTrue:
-        tf = "true"
-    else:
-        tf = "false"
+    matched = []
+    if keywords:
+        for url, extracted in candidates:
+            lower_text = extracted.lower()
+            if any(kw in lower_text for kw in keywords):
+                matched.append((url, extracted))
 
-    promptForward = (f"I am going to feed you 1 evaluation statement and {maxNumTexts} texts. Argue that the evaluation statement "
-                     f"is {tf} based solely on those {maxNumTexts} texts")
-    argument = ollamaClient.chat(
-        model=modelName,
+    chosen_articles = matched if matched else candidates
+
+    texts = ""
+    source_num = 1
+    for url, extracted in chosen_articles:
+        texts += f"[Source {source_num}: {url}]\n{extracted}\n[/Source {source_num}]\n\n"
+        source_num += 1
+
+    tf = "true" if argueTrue else "false"
+
+    promptForward = (
+        f"I am going to feed you 1 evaluation statement and up to {maxNumTexts} texts. "
+        f"Argue that the evaluation statement is {tf} based solely on those texts. "
+        "Present the argument as 3 distinct, individual points supporting this position. "
+        "Start each point with [Source x: link] using the exact source number and URL provided in the texts, followed by the point. "
+        "For each point, state the specific claim and explain the reasoning behind it, showing how the relevant information in the texts supports the point and the overall position. "
+        "Do not summarize the texts or provide a general recap; analyze the evidence and explain why it matters to the evaluation statement. "
+        "Keep the points separate, avoid repeating the same argument, and do not introduce facts or assumptions that are not supported by the texts."
+    )
+    argument = ollama_client.chat(
+        model=model_name,
         messages=[
             {
                 'role': 'user',
@@ -52,73 +161,619 @@ def SearchAndArgue(client, statement, searchPrompt, maxNumTexts, argueTrue):
             }
         ]
     )
-    if argueTrue:
-        print("Here is the argument for truth:")
-    else:
-        print("Here is the argument for falsehood:")
-    print(argument.message.content)
+    return argument.message.content
 
-if __name__ == '__main__':
-    # Use a breakpoint in the code line below to debug your script.
-    program_description = 'This is a test tool for extracting text from articles'
-    parser = argparse.ArgumentParser(description=program_description)
 
-    """
-    logging.basicConfig(
-        level=logging.DEBUG,
-        format="%(levelname)s:%(name)s:%(message)s"
-    )
-    """
-
-    #parser.add_argument('--url')
-    #args = parser.parse_args()
-    #url = args.url
-    #url = 'https://apnews.com/article/hurricane-isaias-landfall-gulf-alabama-mississippi-919a46d4bd705726b4e57f18ce677ac5'
-    url2 = 'https://www.theguardian.com/world/2026/oct/13/allies-did-not-warn-kyiv-of-russian-ballistic-missile-strikes-says-zelenskyy'
-    #download = trafilatura.fetch_response(url, decode=True)
-    #print(download)
-    download = trafilatura.fetch_url(url2)
-    #startListToken = '+++++'
-    delimiter = '$$$'
-    howToFormatOutputSubPrompt = (f"Delimit statements by putting {delimiter} at the end of each individual statement")
-    # (f"In your output for this prompt, output '{startListToken}' to show the beginning of statements."
-    howToExtractSubPrompt = ("I am going to feed you a news article. Extract from the following text statements that may be true or false, but do not make a"
-                             " decision if those statements are true or false:")
+def extract_statements(source, selected_model):
+    source = validate_article_url(source)
+    download = trafilatura.fetch_url(source)
     extractedText = trafilatura.extract(download)
-    print(extractedText)
-    print("++++++++++")
-    print("++++++++++")
-    modelName="llama3.2:3b"
-    ollamaClient = Client(host='http://localhost:11434')
-    #client = instructor.from_provider("ollama/llama3.2")
-    extractedStatementsText = ollamaClient.chat(
-        model=modelName,
-        messages=[
-            {
-                'role': 'user',
-                'content': f"{howToFormatOutputSubPrompt} {howToExtractSubPrompt} {extractedText}"
-            }
-        ]
+    if extractedText is None:
+        raise ValueError("No article text could be extracted from that link.")
+
+    prompt = (
+        "Extract between 5 and 10 distinct factual or arguable statements from the "
+        "following article that could be evaluated as true or false. Return each "
+        "statement as a separate item in the statements list, without combining "
+        "multiple statements into one item, without judging true/false, and without "
+        f"numbering: {extractedText}"
     )
-    statementsText = extractedStatementsText.message.content
-    print(statementsText)
-    tokens = statementsText.split(delimiter)
-    for z in tokens:
-        print(z)
+    ollamaClient = Client(host='http://localhost:11434')
+    response = ollamaClient.chat(
+        model=selected_model,
+        format=StatementList.model_json_schema(),
+        messages=[{"role": "user", "content": prompt}],
+    )
+    result = StatementList.model_validate_json(response.message.content)
+
+    statements = []
+    for item in result.statements:
+        for line in item.splitlines():
+            line = line.strip(" \t\r\n()[]")
+            while line and (line[0].isdigit() or line[0] in ".-) "):
+                line = line[1:].strip()
+            if len(line) > 180 and ". " in line:
+                for part in line.split(". "):
+                    part = part.strip(" \t\r\n()[]")
+                    if part:
+                        statements.append(part if part.endswith(".") else part + ".")
+            elif line:
+                statements.append(line)
+
+    if not statements:
+        raise ValueError("No statements could be extracted from the article.")
+
+    return statements
 
 
+def run_analysis(chosenStatement, selected_model, numSources):
+    numSources = min(max(1, int(numSources)), 3)
 
-    #Grab a statement at random --> for now
-    chosenStatement = random.choice(tokens)
-    print("Chosen statement:")
-    print(chosenStatement)
-
-    numSources = 3
-    defenseSearchPrompt = (f"Here is a statement. Find me {numSources} resources defending this statement: {chosenStatement}") #what do we do when there just aren't enough good sources?
+    defenseSearchPrompt = (f"Here is a statement. Find me {numSources} resources defending this statement: {chosenStatement}")
     offenseSearchPrompt = (f"Here is a statement. Find me {numSources} resources countering this statement: {chosenStatement}")
     client = TavilyClient(api_key=os.environ["TAVILY_API_KEY"])
 
-    #Find and Build offense report
-    SearchAndArgue(client, chosenStatement, defenseSearchPrompt, numSources, True)
-    #Find and Build defense report
-    SearchAndArgue(client, chosenStatement, offenseSearchPrompt, numSources, False)
+    for_ollama = Client(host='http://localhost:11434')
+    against_ollama = Client(host='http://localhost:11434')
+
+    argument_for = SearchAndArgue(client, for_ollama, selected_model, chosenStatement, defenseSearchPrompt, numSources, True)
+    argument_against = SearchAndArgue(client, against_ollama, selected_model, chosenStatement, offenseSearchPrompt, numSources, False)
+    judgement_of_argument_for = JudgeIfStatementSensical(for_ollama, selected_model, argument_for)
+    judgement_of_argument_against = JudgeIfStatementSensical(against_ollama, selected_model, argument_against)
+
+    return {
+        "chosen_statement": chosenStatement,
+        "argument_for": argument_for,
+        "argument_against": argument_against,
+        "judgement_of_argument_for": judgement_of_argument_for,
+        "judgement_of_argument_against": judgement_of_argument_against
+    }
+
+
+def escape_latex(text):
+    """Escape special LaTeX characters so generated text compiles cleanly."""
+    replacements = {
+        "\\": r"\textbackslash{}",
+        "&": r"\&",
+        "%": r"\%",
+        "$": r"\$",
+        "#": r"\#",
+        "_": r"\_",
+        "{": r"\{",
+        "}": r"\}",
+        "~": r"\textasciitilde{}",
+        "^": r"\textasciicircum{}",
+    }
+    return "".join(replacements.get(ch, ch) for ch in (text or ""))
+
+
+def build_latex_document(chosen_statement, argument_for, argument_against, judgement_of_argument_for, judgement_of_argument_against):
+    """Build a complete LaTeX document string for the dissection results."""
+    stmt_tex = escape_latex(chosen_statement)
+    for_tex = escape_latex(argument_for).replace("\n\n", "\n\n\\medskip\n\n").replace("\n", "\\\\\n")
+    against_tex = escape_latex(argument_against).replace("\n\n", "\n\n\\medskip\n\n").replace("\n", "\\\\\n")
+    judge_for_tex = escape_latex(judgement_of_argument_for).replace("\n\n", "\n\n\\medskip\n\n").replace("\n", "\\\\\n")
+    judge_against_tex = escape_latex(judgement_of_argument_against).replace("\n\n", "\n\n\\medskip\n\n").replace("\n", "\\\\\n")
+
+    return (
+        "\\documentclass[11pt]{article}\n"
+        "\\usepackage[margin=1in]{geometry}\n"
+        "\\usepackage[T1]{fontenc}\n"
+        "\\usepackage[utf8]{inputenc}\n"
+        "\\usepackage{xcolor}\n"
+        "\\usepackage{hyperref}\n"
+        "\\definecolor{accent}{HTML}{087E8B}\n"
+        "\\title{Discourse Dissector Report}\n"
+        "\\date{}\n"
+        "\\begin{document}\n"
+        "\\maketitle\n\n"
+        "\\section*{Chosen Statement}\n"
+        f"\\begin{{quote}}{stmt_tex}\\end{{quote}}\n\n"
+        "\\section*{Arguments FOR}\n"
+        f"{for_tex}\n\n"
+        "\\section*{Arguments AGAINST}\n"
+        f"{against_tex}\n\n"
+        "\\section*{Self-Judgement FOR}\n"
+        f"{judge_for_tex}\n\n"
+        "\\section*{Self-Judgement AGAINST}\n"
+        f"{judge_against_tex}\n\n"
+        "\\end{document}\n"
+    )
+
+
+def export_latex_and_pdf(tex_path, chosen_statement, argument_for, argument_against, judgement_of_argument_for, judgement_of_argument_against):
+    """Write a .tex file and compile to .pdf via pdflatex if available."""
+    tex_content = build_latex_document(chosen_statement, argument_for, argument_against, judgement_of_argument_for, judgement_of_argument_against)
+    with open(tex_path, "w", encoding="utf-8") as f:
+        f.write(tex_content)
+
+    pdflatex_bin = shutil.which("pdflatex")
+    if not pdflatex_bin:
+        return tex_path, None, "Saved .tex file (pdflatex not found in PATH for PDF export)."
+
+    out_dir = os.path.dirname(os.path.abspath(tex_path))
+    proc = subprocess.run(
+        [pdflatex_bin, "-interaction=nonstopmode", f"-output-directory={out_dir}", os.path.abspath(tex_path)],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    pdf_path = os.path.splitext(os.path.abspath(tex_path))[0] + ".pdf"
+    if proc.returncode == 0 and os.path.exists(pdf_path):
+        return tex_path, pdf_path, f"Exported LaTeX and compiled PDF: {os.path.basename(pdf_path)}"
+
+    return tex_path, None, f"Saved .tex file, but PDF compilation returned an error (code {proc.returncode})."
+
+
+class ScrollableFrame(ttk.Frame):
+    """A frame whose contents can be scrolled vertically in the main window."""
+
+    def __init__(self, master):
+        super().__init__(master)
+        self.canvas = tk.Canvas(self, bg=THEME_BG, highlightthickness=0)
+        self.scrollbar = ttk.Scrollbar(self, orient="vertical", command=self.canvas.yview)
+        self.canvas.configure(yscrollcommand=self.scrollbar.set)
+
+        self.scrollbar.pack(side="right", fill="y")
+        self.canvas.pack(side="left", fill="both", expand=True)
+
+        self.content = ttk.Frame(self.canvas, padding=18)
+        self.content_window = self.canvas.create_window((0, 0), window=self.content, anchor="nw")
+
+        self.content.bind("<Configure>", self._update_scroll_region)
+        self.canvas.bind("<Configure>", self._resize_content)
+        self.canvas.bind_all("<MouseWheel>", self._on_mousewheel)
+        self.canvas.bind_all("<Button-4>", self._on_mousewheel)
+        self.canvas.bind_all("<Button-5>", self._on_mousewheel)
+
+    def _update_scroll_region(self, _event=None):
+        self.canvas.configure(scrollregion=self.canvas.bbox("all"))
+
+    def _resize_content(self, event):
+        self.canvas.itemconfigure(self.content_window, width=event.width)
+
+    def _on_mousewheel(self, event):
+        if getattr(event, "num", None) == 4:
+            self.canvas.yview_scroll(-1, "units")
+        elif getattr(event, "num", None) == 5:
+            self.canvas.yview_scroll(1, "units")
+        elif event.delta:
+            self.canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+
+
+class DiscourseDissector:
+    def __init__(self, root):
+        self.root = root
+        root.title("Discourse Dissector")
+        root.geometry("820x780")
+        root.minsize(600, 540)
+        apply_theme(root)
+
+        self.result_queue = queue.Queue()
+        self.model_var = tk.StringVar(value="llama3.2:3b")
+        self.resources_var = tk.IntVar(value=3)
+        self.statement_selection_var = tk.StringVar(value="")
+        self.extracted_statements = []
+        self.statement_radio_buttons = []
+        self.last_analysis = None
+        self.is_busy = False
+
+        self.scrollable = ScrollableFrame(root)
+        self.scrollable.pack(fill="both", expand=True)
+        self.content = self.scrollable.content
+
+        self._build_gui()
+        self.root.after(100, self._poll_result_queue)
+        self.root.bind("<Configure>", self._resize_statement_cards)
+
+    def _build_gui(self):
+        header = ttk.Frame(self.content)
+        header.pack(fill="x", pady=(0, 18))
+
+        title = tk.Label(
+            header,
+            text="Discourse Dissector",
+            font=("Helvetica", 18, "bold"),
+            bg=THEME_BG,
+            fg=THEME_FG,
+        )
+        title.pack(anchor="center")
+
+        input_frame = ttk.LabelFrame(self.content, text="Input", padding=12)
+        input_frame.pack(fill="x", pady=(0, 12))
+
+        tk.Label(
+            input_frame,
+            text="Enter a link to an article:",
+            bg=THEME_BG,
+            fg=THEME_FG,
+            anchor="w",
+        ).pack(fill="x", pady=(0, 6))
+
+        self.statement_entry = ttk.Entry(input_frame)
+        self.statement_entry.pack(fill="x", ipady=5)
+
+        controls = ttk.Frame(self.content)
+        controls.pack(fill="x", pady=(0, 12))
+        controls.columnconfigure(0, weight=1)
+        controls.columnconfigure(1, weight=1)
+
+        model_frame = ttk.LabelFrame(controls, text="Model", padding=12)
+        model_frame.grid(row=0, column=0, sticky="nsew", padx=(0, 6))
+        self.model_dropdown = ttk.Combobox(
+            model_frame,
+            textvariable=self.model_var,
+            values=("llama3.2:3b", "qwen2.5:3b"),
+            state="readonly",
+        )
+        self.model_dropdown.pack(fill="x")
+
+        resources_frame = ttk.LabelFrame(controls, text="Resources requested", padding=12)
+        resources_frame.grid(row=0, column=1, sticky="nsew", padx=(6, 0))
+
+        self.resources_value_label = tk.Label(
+            resources_frame,
+            textvariable=self.resources_var,
+            bg=THEME_BG,
+            fg=THEME_FG,
+            font=("Segoe UI", 11, "bold"),
+        )
+        self.resources_value_label.pack(anchor="center")
+
+        self.resources_slider = tk.Scale(
+            resources_frame,
+            from_=1,
+            to=3,
+            resolution=1,
+            orient="horizontal",
+            showvalue=False,
+            variable=self.resources_var,
+            bg=THEME_BG,
+            fg=THEME_FG,
+            highlightthickness=0,
+            troughcolor=THEME_FIELD_BG,
+            activebackground=THEME_ACCENT,
+        )
+        self.resources_slider.pack(fill="x")
+
+        run_frame = ttk.Frame(self.content)
+        run_frame.pack(fill="x", pady=(2, 12))
+
+        self.extract_button = ttk.Button(
+            run_frame,
+            text="Extract Statements",
+            style="Accent.TButton",
+            command=self.on_extract,
+        )
+        self.extract_button.pack(anchor="center", ipadx=24, ipady=5)
+
+        self.progress = ttk.Progressbar(run_frame, mode="indeterminate", length=260)
+        self.progress.pack(anchor="center", pady=(10, 4))
+        self.progress.pack_forget()
+
+        self.status_label = tk.Label(
+            run_frame,
+            text="Ready",
+            bg=THEME_BG,
+            fg=THEME_FG,
+        )
+        self.status_label.pack(anchor="center")
+
+        self.selection_frame = ttk.LabelFrame(
+            self.content,
+            text="Select a statement to analyze",
+            padding=12,
+        )
+        tk.Label(
+            self.selection_frame,
+            text="Choose one of the statements extracted from the article:",
+            bg=THEME_BG,
+            fg=THEME_FG,
+            anchor="w",
+            justify="left",
+        ).pack(fill="x", pady=(0, 8))
+
+        self.statements_container = ttk.Frame(self.selection_frame)
+        self.statements_container.pack(fill="x", expand=True)
+
+        self.analyze_button = ttk.Button(
+            self.selection_frame,
+            text="Analyze Selected Statement",
+            style="Accent.TButton",
+            command=self.on_analyze,
+            state="disabled",
+        )
+        self.analyze_button.pack(anchor="center", ipadx=18, ipady=5, pady=(12, 0))
+
+        results_frame = ttk.LabelFrame(self.content, text="Dissection results", padding=12)
+        results_frame.pack(fill="both", expand=True, pady=(0, 12))
+        self.results_frame = results_frame
+
+        self.chosen_statement_label = tk.Label(
+            results_frame,
+            text="Chosen Statement: None yet",
+            bg=THEME_BG,
+            fg=THEME_FG,
+            font=("Segoe UI", 10, "bold"),
+            anchor="w",
+            justify="left",
+            wraplength=720,
+        )
+        self.chosen_statement_label.pack(fill="x", pady=(0, 10))
+
+        sides_frame = ttk.Frame(results_frame)
+        sides_frame.pack(fill="both", expand=True)
+        sides_frame.columnconfigure(0, weight=1, uniform="args")
+        sides_frame.columnconfigure(1, weight=1, uniform="args")
+        sides_frame.rowconfigure(0, weight=1)
+
+        for_box = ttk.LabelFrame(sides_frame, text="Arguments FOR", padding=8)
+        for_box.grid(row=0, column=0, sticky="nsew", padx=(0, 6))
+        self.for_text = self._create_argument_text(
+            for_box,
+            "Extract an article and select a statement to see arguments FOR.",
+        )
+
+        against_box = ttk.LabelFrame(sides_frame, text="Arguments AGAINST", padding=8)
+        against_box.grid(row=0, column=1, sticky="nsew", padx=(6, 0))
+        self.against_text = self._create_argument_text(
+            against_box,
+            "Extract an article and select a statement to see arguments AGAINST.",
+        )
+
+        self.export_button = ttk.Button(
+            results_frame,
+            text="Export to LaTeX / PDF",
+            style="Accent.TButton",
+            command=self.on_export_latex,
+            state="disabled",
+        )
+        self.export_button.pack(anchor="e", pady=(10, 0))
+
+    def _create_argument_text(self, parent, initial_message):
+        container = ttk.Frame(parent)
+        container.pack(fill="both", expand=True)
+
+        text_widget = tk.Text(
+            container,
+            wrap="word",
+            height=22,
+            bg=THEME_FIELD_BG,
+            fg=THEME_FG,
+            relief="solid",
+            borderwidth=1,
+            padx=10,
+            pady=10,
+        )
+        scrollbar = ttk.Scrollbar(container, orient="vertical", command=text_widget.yview)
+        text_widget.configure(yscrollcommand=scrollbar.set)
+        scrollbar.pack(side="right", fill="y")
+        text_widget.pack(side="left", fill="both", expand=True)
+
+        text_widget.insert("end", initial_message + "\n")
+        text_widget.configure(state="disabled")
+        return text_widget
+
+    def _resize_statement_cards(self, event):
+        if event.widget is self.root:
+            wraplength = max(300, event.width - 150)
+            for radio_button in self.statement_radio_buttons:
+                radio_button.configure(wraplength=wraplength)
+            self.chosen_statement_label.configure(wraplength=max(300, event.width - 80))
+
+    def _populate_statement_selection(self):
+        for child in self.statements_container.winfo_children():
+            child.destroy()
+        self.statement_radio_buttons.clear()
+        self.statement_selection_var.set("")
+
+        for index, statement in enumerate(self.extracted_statements):
+            card = tk.Frame(
+                self.statements_container,
+                bg=THEME_FIELD_BG,
+                highlightbackground="#c5d5dc",
+                highlightthickness=1,
+                padx=8,
+                pady=6,
+            )
+            card.pack(fill="x", pady=4)
+
+            radio_button = tk.Radiobutton(
+                card,
+                text=f"{index + 1}. {statement}",
+                variable=self.statement_selection_var,
+                value=str(index),
+                command=self._on_statement_selected,
+                wraplength=max(300, self.root.winfo_width() - 150),
+                justify="left",
+                anchor="w",
+                bg=THEME_FIELD_BG,
+                fg=THEME_FG,
+                activebackground=THEME_FIELD_BG,
+                activeforeground=THEME_FG,
+                selectcolor=THEME_BG,
+                font=THEME_FONT,
+                padx=4,
+                pady=4,
+            )
+            radio_button.pack(fill="x", anchor="w")
+            self.statement_radio_buttons.append(radio_button)
+
+    def _on_statement_selected(self):
+        selected = self.statement_selection_var.get()
+        valid_selection = selected.isdigit() and int(selected) < len(self.extracted_statements)
+        self.analyze_button.configure(state="normal" if valid_selection and not self.is_busy else "disabled")
+
+    def _set_busy(self, busy, status_text=None):
+        self.is_busy = busy
+        widget_state = "disabled" if busy else "normal"
+        self.statement_entry.configure(state=widget_state)
+        self.model_dropdown.configure(state="disabled" if busy else "readonly")
+        self.resources_slider.configure(state=widget_state)
+        self.extract_button.configure(state=widget_state)
+        self.export_button.configure(
+            state="normal" if (not busy and self.last_analysis is not None) else "disabled"
+        )
+
+        if busy:
+            self.progress.pack(anchor="center", pady=(10, 4))
+            self.progress.start(10)
+            self.analyze_button.configure(state="disabled")
+        else:
+            self.progress.stop()
+            self.progress.pack_forget()
+            self._on_statement_selected()
+
+        if status_text:
+            self.status_label.configure(text=status_text)
+
+    def _set_box_text(self, text_widget, content):
+        text_widget.configure(state="normal")
+        text_widget.delete("1.0", "end")
+        text_widget.insert("end", content)
+        text_widget.configure(state="disabled")
+        text_widget.yview_moveto(0)
+
+    def _set_results(self, for_content, against_content, chosen_statement=None):
+        if chosen_statement is not None:
+            self.chosen_statement_label.configure(text=f"Chosen Statement: {chosen_statement}")
+        self._set_box_text(self.for_text, for_content)
+        self._set_box_text(self.against_text, against_content)
+        #self._set_box_text(self.judgement_for_text, judgement_for_content)
+        #self._set_box_text(self.judgement_against_text, judgement_against_content)
+
+    def on_extract(self):
+        source = self.statement_entry.get().strip()
+        if not source:
+            self.status_label.configure(text="Enter an article URL first.")
+            return
+
+        try:
+            source = validate_article_url(source)
+        except ValueError as exc:
+            self.status_label.configure(text=str(exc))
+            return
+
+        self.extracted_statements = []
+        self.statement_selection_var.set("")
+        self.selection_frame.pack_forget()
+        self._set_results(
+            "Extracting statements from the article...\n",
+            "Extracting statements from the article...\n",
+            chosen_statement="None yet",
+        )
+        selected_model = self.model_var.get()
+        self._set_busy(True, "Extracting statements from the article...")
+
+        worker = threading.Thread(
+            target=self._extract_in_background,
+            args=(source, selected_model),
+            daemon=True,
+        )
+        worker.start()
+
+    def on_analyze(self):
+        selected = self.statement_selection_var.get()
+        if not selected.isdigit() or int(selected) >= len(self.extracted_statements):
+            self.status_label.configure(text="Select a statement before analyzing.")
+            return
+
+        chosen_statement = self.extracted_statements[int(selected)]
+        selected_model = self.model_var.get()
+        num_sources = int(self.resources_var.get())
+
+        self._set_results(
+            "Searching for sources and generating arguments FOR...\n",
+            "Searching for sources and generating arguments AGAINST...\n",
+            chosen_statement=chosen_statement,
+        )
+        self._set_busy(True, "Searching for sources and generating arguments...")
+
+        worker = threading.Thread(
+            target=self._analyze_in_background,
+            args=(chosen_statement, selected_model, num_sources),
+            daemon=True,
+        )
+        worker.start()
+
+    def on_export_latex(self):
+        if not self.last_analysis:
+            self.status_label.configure(text="Run an analysis before exporting.")
+            return
+
+        file_path = filedialog.asksaveasfilename(
+            title="Save LaTeX Report",
+            defaultextension=".tex",
+            filetypes=[("LaTeX files", "*.tex"), ("All files", "*.*")],
+        )
+        if not file_path:
+            return
+
+        try:
+            _tex_path, _pdf_path, message = export_latex_and_pdf(
+                file_path,
+                self.last_analysis["chosen_statement"],
+                self.last_analysis["argument_for"],
+                self.last_analysis["argument_against"],
+                self.last_analysis["judgement_of_argument_for"],
+                self.last_analysis["judgement_of_argument_against"]
+            )
+            self.status_label.configure(text=message)
+        except Exception as exc:
+            self.status_label.configure(text=f"Export failed: {exc}")
+
+    def _extract_in_background(self, source, selected_model):
+        try:
+            statements = extract_statements(source, selected_model)
+            self.result_queue.put(("extraction_success", statements))
+        except Exception as exc:
+            self.result_queue.put(("error", f"{type(exc).__name__}: {exc}"))
+
+    def _analyze_in_background(self, chosen_statement, selected_model, num_sources):
+        try:
+            result = run_analysis(chosen_statement, selected_model, num_sources)
+            self.result_queue.put(("analysis_success", result))
+        except Exception as exc:
+            self.result_queue.put(("error", f"{type(exc).__name__}: {exc}"))
+
+    def _poll_result_queue(self):
+        try:
+            result_type, result = self.result_queue.get_nowait()
+        except queue.Empty:
+            self.root.after(100, self._poll_result_queue)
+            return
+
+        self._set_busy(False)
+
+        if result_type == "extraction_success":
+            self.extracted_statements = result
+            self._populate_statement_selection()
+            self.selection_frame.pack(fill="x", pady=(0, 12), before=self.results_frame)
+            self._set_results(
+                "Select a statement above, then click 'Analyze Selected Statement'.\n",
+                "Select a statement above, then click 'Analyze Selected Statement'.\n",
+                chosen_statement="None yet",
+            )
+            self.status_label.configure(text=f"Extracted {len(result)} statement(s). Select one to continue.")
+        elif result_type == "analysis_success":
+            self.last_analysis = result
+            self.export_button.configure(state="normal")
+            judgement_intro_str = "I have double-checked my work. This is what I got on the second time around"
+            self._set_results(
+                f"{result['argument_for']}\n\n {judgement_intro_str}\n {result['judgement_of_argument_for']}\n",
+                f"{result['argument_against']}\n\n {judgement_intro_str}\n {result['judgement_of_argument_against']}\n",
+                chosen_statement=result["chosen_statement"],
+            )
+            self.status_label.configure(text="Dissection complete. You can select another statement to analyze.")
+        else:
+            error_msg = f"The dissection could not be completed.\n\n{result}\n"
+            self._set_results(error_msg, error_msg)
+            self.status_label.configure(text="An error occurred. See the results area for details.")
+
+        self.root.after(100, self._poll_result_queue)
+
+
+if __name__ == '__main__':
+    root = tk.Tk()
+    app = DiscourseDissector(root)
+    root.mainloop()
